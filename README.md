@@ -2,13 +2,11 @@
 
 TP-Link, Kasa and Tapo discovery for Home Assistant on Docker bridge networks.
 
-Relays UDP 9999, 20002 and 20004 between the LAN and Docker, with the firewall
-rules needed for replies.
+Relays UDP 9999, 20002 and 20004 between the LAN and Docker, with the firewall rules needed for replies.
 
 ## Run
 
-Requires Linux, rootful Docker, Compose and a fixed Home Assistant address on a
-user-defined bridge network.
+Requires Linux, rootful Docker, Compose and a fixed Home Assistant address on a user-defined bridge network.
 
 Stop any existing relay for these ports before starting this one.
 
