@@ -3,16 +3,15 @@
 set -Eeuo pipefail
 
 status=0
-IFS=',' read -r -a ports <<<"${RELAY_PORTS:-9999,20002,20004}"
 
-for port in "${ports[@]}"; do
+for port in 9999 20002 20004; do
     mapfile -t relay_pids < <(
         pgrep -f "^/usr/local/bin/udp-broadcast-relay-redux .*--port ${port}([[:space:]]|$)" \
             || true
     )
 
     if (( ${#relay_pids[@]} != 1 )); then
-        echo "health: expected one relay process for UDP $port; found ${#relay_pids[@]}" >&2
+        echo "health: UDP $port has ${#relay_pids[@]} relay processes; expected 1" >&2
         status=1
     fi
 done

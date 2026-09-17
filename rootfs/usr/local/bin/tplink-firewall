@@ -2,13 +2,17 @@
 # shellcheck shell=bash
 set -Eeuo pipefail
 
+# shellcheck source=/dev/null
+source /usr/local/lib/tplink-network.sh
+
 : "${LAN_IF:?LAN_IF is required}"
 : "${LAN_NET:?LAN_NET is required}"
 : "${DOCKER_SUBNET:?DOCKER_SUBNET is required}"
 : "${HA_IP:?HA_IP is required}"
-HA_PORT="${HA_PORT:-8123}"
-PORTS="${RELAY_PORTS:-9999,20002,20004}"
-CHECK_INTERVAL="${FIREWALL_CHECK_INTERVAL:-30}"
+: "${HA_PORT:?HA_PORT is required}"
+: "${FIREWALL_CHECK_INTERVAL:?FIREWALL_CHECK_INTERVAL is required}"
+PORTS="9999,20002,20004"
+CHECK_INTERVAL="$FIREWALL_CHECK_INTERVAL"
 
 NAT_CHAIN="TPLINK_HA_DNAT"
 FWD_CHAIN="TPLINK_HA_FWD"
@@ -28,7 +32,7 @@ log() {
 choose_iptables() {
     local candidate
 
-    for candidate in iptables iptables-nft iptables-legacy; do
+    for candidate in iptables iptables-legacy; do
         if command -v "$candidate" >/dev/null 2>&1 \
             && "$candidate" -w 1 -S DOCKER-USER >/dev/null 2>&1; then
             IPT="$(command -v "$candidate")"
@@ -37,44 +41,6 @@ choose_iptables() {
     done
 
     return 1
-}
-
-interface_ipv4() {
-    ip -4 -o address show dev "$1" scope global 2>/dev/null |
-        awk 'NR == 1 { split($4, address, "/"); print address[1] }'
-}
-
-route_device_for_ip() {
-    ip -4 route get "$1" 2>/dev/null |
-        awk '{
-            for (i = 1; i <= NF; i++) {
-                if ($i == "dev") {
-                    print $(i + 1)
-                    exit
-                }
-            }
-        }'
-}
-
-bridge_for_subnet() {
-    local -a route_devices=()
-
-    mapfile -t route_devices < <(
-        ip -4 route show exact "$DOCKER_SUBNET" 2>/dev/null |
-            awk '{
-                for (i = 1; i <= NF; i++) {
-                    if ($i == "dev") {
-                        print $(i + 1)
-                        break
-                    }
-                }
-            }'
-    )
-
-    (( ${#route_devices[@]} == 1 )) || return 1
-    [[ "${route_devices[0]}" != "lo" && "${route_devices[0]}" != "$LAN_IF" ]] \
-        || return 1
-    printf '%s\n' "${route_devices[0]}"
 }
 
 resolve_runtime() {
@@ -87,9 +53,9 @@ resolve_runtime() {
         return 1
     fi
 
-    BRIDGE_IF="$(bridge_for_subnet || true)"
+    BRIDGE_IF="$(bridge_for_subnet "$DOCKER_SUBNET" "$LAN_IF" || true)"
     if [[ -z "$BRIDGE_IF" ]]; then
-        RUNTIME_ERROR="expected one non-LAN route for Docker subnet $DOCKER_SUBNET"
+        RUNTIME_ERROR="Docker subnet $DOCKER_SUBNET must have one non-LAN route"
         return 1
     fi
 
@@ -98,18 +64,14 @@ resolve_runtime() {
         return 1
     fi
 
-    ha_route_if="$(route_device_for_ip "$HA_IP")"
+    ha_route_if="$(route_interface_for_ip "$HA_IP")"
     if [[ "$ha_route_if" != "$BRIDGE_IF" ]]; then
-        RUNTIME_ERROR="Home Assistant $HA_IP routes through ${ha_route_if:-no interface}, not $BRIDGE_IF"
+        RUNTIME_ERROR="Home Assistant $HA_IP uses ${ha_route_if:-no interface}, not $BRIDGE_IF"
         return 1
     fi
 
-    if ! curl --silent --fail \
-        --connect-timeout 2 \
-        --max-time 4 \
-        --output /dev/null \
-        "http://$HA_IP:$HA_PORT/"; then
-        RUNTIME_ERROR="Home Assistant endpoint http://$HA_IP:$HA_PORT/ is not ready"
+    if ! wget -q -T 4 -O /dev/null "http://$HA_IP:$HA_PORT/"; then
+        RUNTIME_ERROR="Home Assistant is not ready at http://$HA_IP:$HA_PORT/"
         return 1
     fi
 }
@@ -214,7 +176,7 @@ fail_closed() {
     local reason="$1"
 
     if [[ "$reason" != "$LAST_ERROR" ]]; then
-        log "firewall: rules withheld: $reason"
+        log "firewall: rules disabled: $reason"
         LAST_ERROR="$reason"
     fi
 
@@ -229,9 +191,9 @@ apply_rules() {
     local signature
 
     if ! choose_iptables; then
-        if [[ "$LAST_ERROR" != "Docker's DOCKER-USER chain is unavailable" ]]; then
-            log "firewall: rules withheld: Docker's DOCKER-USER chain is unavailable"
-            LAST_ERROR="Docker's DOCKER-USER chain is unavailable"
+        if [[ "$LAST_ERROR" != "DOCKER-USER is not available" ]]; then
+            log "firewall: rules disabled: DOCKER-USER is not available"
+            LAST_ERROR="DOCKER-USER is not available"
         fi
         return 1
     fi
@@ -244,23 +206,20 @@ apply_rules() {
     ensure_chains
     ensure_jumps
 
-    signature="$HOST_IP|$BRIDGE_IF|$DOCKER_SUBNET|$HA_IP|$HA_PORT|$PORTS"
+    signature="$HOST_IP|$BRIDGE_IF|$HA_IP"
     if [[ "$signature" != "$LAST_SIGNATURE" ]] \
         || ! managed_rules_present; then
         program_chains
         LAST_SIGNATURE="$signature"
         LAST_ERROR=""
 
-        log "firewall: TP-Link discovery return path active"
-        log "firewall: LAN $LAN_NET via $LAN_IF"
-        log "firewall: host $HOST_IP -> HA $HA_IP via $BRIDGE_IF"
-        log "firewall: UDP source ports $PORTS"
+        log "firewall: return path active: $HOST_IP -> $HA_IP via $BRIDGE_IF"
     fi
 }
 
 cleanup_rules() {
     if ! choose_iptables; then
-        # Docker may already have removed all of its chains.
+        # Docker can remove its chains before this service stops.
         return 0
     fi
 
@@ -274,7 +233,7 @@ check_rules() {
     local nat_rule_count fwd_rule_count
 
     if ! choose_iptables; then
-        echo "health: Docker's DOCKER-USER chain is unavailable" >&2
+        echo "health: DOCKER-USER is not available" >&2
         return 1
     fi
 
@@ -286,14 +245,14 @@ check_rules() {
     mapfile -d '' -t rule < <(nat_jump_rule)
     if ! "$IPT" -w 5 -t nat \
         -C PREROUTING "${rule[@]}" >/dev/null 2>&1; then
-        echo "health: the managed PREROUTING jump is absent" >&2
+        echo "health: the managed PREROUTING jump is missing" >&2
         return 1
     fi
 
     mapfile -d '' -t rule < <(fwd_jump_rule)
     if ! "$IPT" -w 5 \
         -C DOCKER-USER "${rule[@]}" >/dev/null 2>&1; then
-        echo "health: the managed DOCKER-USER jump is absent" >&2
+        echo "health: the managed DOCKER-USER jump is missing" >&2
         return 1
     fi
 
@@ -311,7 +270,7 @@ check_rules() {
             awk '$1 == "-A" { count++ } END { print count + 0 }'
     )"
     if [[ "$nat_rule_count" != 1 || "$fwd_rule_count" != 1 ]]; then
-        echo "health: managed chains contain unexpected rules" >&2
+        echo "health: managed chains have extra rules" >&2
         return 1
     fi
 }

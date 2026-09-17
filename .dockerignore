@@ -1,6 +1,8 @@
 *
 !Dockerfile
 !LICENSE
+!lib/
+!lib/**
 !rootfs/
 !rootfs/**
 !vendor/

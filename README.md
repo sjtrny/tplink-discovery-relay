@@ -1,14 +1,14 @@
 # tplink-discovery-relay
 
-TP-Link, Kasa and Tapo discovery for Home Assistant on Docker bridge networks.
+TP-Link, Kasa, and Tapo discovery for Home Assistant on Docker bridge networks.
 
-Relays UDP 9999, 20002 and 20004 between the LAN and Docker, with the firewall rules needed for replies.
+This container relays UDP discovery packets between the LAN and Home Assistant. It supports ports 9999, 20002, and 20004.
 
 ## Run
 
-Requires Linux, rootful Docker, Compose and a fixed Home Assistant address on a user-defined bridge network.
+You need Linux, rootful Docker, Docker Compose, and a fixed Home Assistant address on a user-defined bridge network.
 
-Stop any existing relay for these ports before starting this one.
+Stop other relays that use these ports.
 
 ```sh
 cp .env.example .env
@@ -46,16 +46,15 @@ services:
 
 | Variable | Default | Use |
 | --- | --- | --- |
-| `LAN_IF` | Required | Physical LAN interface |
+| `LAN_IF` | Required | LAN interface |
 | `LAN_NET` | Required | LAN subnet in CIDR notation |
 | `DOCKER_SUBNET` | Required | Home Assistant Docker subnet |
 | `HA_IP` | Required | Fixed Home Assistant address |
 | `HA_PORT` | `8123` | Home Assistant HTTP port |
 | `RELAY_DEBUG` | `false` | Packet logging |
 
-The Docker interface is detected automatically. Health checks cover the relay processes, Home Assistant endpoint and firewall rules.
+The container finds the Docker interface. Its health check verifies the relay processes, the Home Assistant endpoint, and the firewall rules.
 
 ## License
 
-[GPL-2.0-or-later](LICENSE). Includes
-[`udp-broadcast-relay-redux`](https://github.com/FirbyKirby/udp-broadcast-relay).
+[GPL-2.0-or-later](LICENSE). Uses [`udp-broadcast-relay-redux`](https://github.com/FirbyKirby/udp-broadcast-relay).
