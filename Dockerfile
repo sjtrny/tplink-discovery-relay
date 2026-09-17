@@ -97,7 +97,6 @@ COPY --from=relay-builder \
   /usr/local/bin/udp-broadcast-relay-redux \
   /usr/local/bin/udp-broadcast-relay-redux
 
-COPY SOURCE_MANIFEST /usr/local/share/tplink-discovery-relay/SOURCE_MANIFEST
 COPY LICENSE /usr/local/share/licenses/tplink-discovery-relay/LICENSE
 COPY rootfs/ /
 
