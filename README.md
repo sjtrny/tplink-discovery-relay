@@ -53,8 +53,7 @@ services:
 | `HA_PORT` | `8123` | Home Assistant HTTP port |
 | `RELAY_DEBUG` | `false` | Packet logging |
 
-The Docker interface is detected automatically. Health checks cover the relay
-processes, Home Assistant endpoint and firewall rules.
+The Docker interface is detected automatically. Health checks cover the relay processes, Home Assistant endpoint and firewall rules.
 
 ## License
 
