@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+
+# Local deployment records contain host-specific details.
+PRODUCTION_STATE.md
+ROBUSTNESS_PLAN.md
+
+compose.override.yml
+compose.override.yaml

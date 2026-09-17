@@ -1,0 +1,181 @@
+#!/command/with-contenv bash
+# shellcheck shell=bash
+set -Eeuo pipefail
+
+required=(
+    LAN_IF
+    LAN_NET
+    DOCKER_SUBNET
+    HA_IP
+    HA_PORT
+    RELAY_PORTS
+    FIREWALL_CHECK_INTERVAL
+    RELAY_TOPOLOGY_CHECK_INTERVAL
+)
+
+fail() {
+    echo "configuration error: $*" >&2
+    exit 1
+}
+
+valid_ipv4() {
+    local value="$1"
+    local part
+    local -a parts=()
+
+    [[ "$value" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+    IFS='.' read -r -a parts <<<"$value"
+
+    for part in "${parts[@]}"; do
+        (( 10#$part <= 255 )) || return 1
+    done
+}
+
+network_of() {
+    ipcalc -n "$1" 2>/dev/null |
+        awk -F= '$1 == "NETWORK" { print $2; exit }'
+}
+
+valid_network_cidr() {
+    local value="$1"
+    local address prefix network
+
+    [[ "$value" =~ ^([^/]+)/([0-9]{1,2})$ ]] || return 1
+    address="${BASH_REMATCH[1]}"
+    prefix="${BASH_REMATCH[2]}"
+    valid_ipv4 "$address" || return 1
+    (( 10#$prefix <= 32 )) || return 1
+    network="$(network_of "$value")"
+    [[ -n "$network" && "$value" == "$network/$((10#$prefix))" ]]
+}
+
+valid_port() {
+    [[ "$1" =~ ^[0-9]+$ ]] \
+        && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
+interface_ipv4() {
+    ip -4 -o address show dev "$1" scope global 2>/dev/null |
+        awk 'NR == 1 { split($4, address, "/"); print address[1] }'
+}
+
+route_device_for_ip() {
+    ip -4 route get "$1" 2>/dev/null |
+        awk '{
+            for (i = 1; i <= NF; i++) {
+                if ($i == "dev") {
+                    print $(i + 1)
+                    exit
+                }
+            }
+        }'
+}
+
+for name in "${required[@]}"; do
+    [[ -n "${!name:-}" ]] || fail "$name is empty"
+done
+
+[[ "$LAN_IF" =~ ^[[:alnum:]_.:@-]{1,15}$ ]] \
+    || fail "LAN_IF is not a valid Linux interface name: $LAN_IF"
+valid_network_cidr "$LAN_NET" || fail "LAN_NET is not a normalized IPv4 CIDR: $LAN_NET"
+valid_network_cidr "$DOCKER_SUBNET" \
+    || fail "DOCKER_SUBNET is not a normalized IPv4 CIDR: $DOCKER_SUBNET"
+valid_ipv4 "$HA_IP" || fail "HA_IP is not an IPv4 address: $HA_IP"
+valid_port "$HA_PORT" || fail "HA_PORT is not a valid TCP port: $HA_PORT"
+
+docker_prefix="${DOCKER_SUBNET#*/}"
+docker_network="${DOCKER_SUBNET%/*}"
+ha_network="$(network_of "$HA_IP/$docker_prefix")"
+[[ "$ha_network" == "$docker_network" ]] \
+    || fail "HA_IP $HA_IP is outside DOCKER_SUBNET $DOCKER_SUBNET"
+
+for interval_name in FIREWALL_CHECK_INTERVAL RELAY_TOPOLOGY_CHECK_INTERVAL; do
+    interval="${!interval_name}"
+    if ! [[ "$interval" =~ ^[0-9]+$ ]] \
+        || ! (( 10#$interval >= 1 && 10#$interval <= 3600 )); then
+        fail "$interval_name must be between 1 and 3600 seconds"
+    fi
+done
+
+case "${RELAY_DEBUG,,}" in
+    0|1|false|true|no|yes|off|on) ;;
+    *) fail "RELAY_DEBUG must be a Boolean value" ;;
+esac
+
+IFS=',' read -r -a ports <<<"$RELAY_PORTS"
+declare -A seen_ports=()
+for port in "${ports[@]}"; do
+    valid_port "$port" || fail "invalid relay port: $port"
+    [[ -z "${seen_ports[$port]:-}" ]] || fail "duplicate relay port: $port"
+    seen_ports[$port]=1
+done
+
+for required_port in 9999 20002 20004; do
+    [[ -n "${seen_ports[$required_port]:-}" ]] \
+        || fail "RELAY_PORTS must include supported port $required_port"
+done
+(( ${#seen_ports[@]} == 3 )) \
+    || fail "RELAY_PORTS contains an unsupported port"
+
+declare -A seen_ids=()
+declare -A service_ports=()
+for spec in 41:9999 42:20002 43:20004; do
+    relay_id="${spec%%:*}"
+    port="${spec#*:}"
+    if ! [[ "$relay_id" =~ ^[0-9]+$ ]] \
+        || ! (( 10#$relay_id >= 1 && 10#$relay_id <= 99 )); then
+        fail "invalid relay ID in service definition: $relay_id"
+    fi
+    [[ -z "${seen_ids[$relay_id]:-}" ]] || fail "duplicate relay ID: $relay_id"
+    [[ -z "${service_ports[$port]:-}" ]] || fail "duplicate service port: $port"
+    seen_ids[$relay_id]=1
+    service_ports[$port]=1
+done
+
+mapfile -t docker_routes < <(
+    ip -4 route show exact "$DOCKER_SUBNET" 2>/dev/null |
+        awk '{
+            for (i = 1; i <= NF; i++) {
+                if ($i == "dev") {
+                    print $(i + 1)
+                    break
+                }
+            }
+        }'
+)
+
+bridge_if=""
+case "${#docker_routes[@]}" in
+    0)
+        echo "configuration: Docker subnet route is not ready; services will wait"
+        ;;
+    1)
+        bridge_if="${docker_routes[0]}"
+        [[ "$bridge_if" != "lo" && "$bridge_if" != "$LAN_IF" ]] \
+            || fail "DOCKER_SUBNET resolves to invalid relay interface $bridge_if"
+        ha_route_if="$(route_device_for_ip "$HA_IP")"
+        [[ "$ha_route_if" == "$bridge_if" ]] \
+            || fail "HA_IP routes through ${ha_route_if:-no interface}, not $bridge_if"
+        ;;
+    *)
+        fail "DOCKER_SUBNET has multiple exact routes: ${docker_routes[*]}"
+        ;;
+esac
+
+if ! ip link show "$LAN_IF" >/dev/null 2>&1; then
+    echo "configuration: LAN interface $LAN_IF is not ready; services will wait"
+elif [[ -z "$(interface_ipv4 "$LAN_IF")" ]]; then
+    echo "configuration: LAN interface $LAN_IF has no IPv4 address; services will wait"
+fi
+
+if ! iptables -S DOCKER-USER >/dev/null 2>&1 \
+    && ! iptables-nft -S DOCKER-USER >/dev/null 2>&1 \
+    && ! iptables-legacy -S DOCKER-USER >/dev/null 2>&1; then
+    echo "configuration: DOCKER-USER is not ready; firewall service will wait"
+fi
+
+echo "configuration accepted:"
+echo "  LAN=$LAN_NET via $LAN_IF"
+echo "  Docker subnet=$DOCKER_SUBNET via ${bridge_if:-pending}"
+echo "  Home Assistant=http://$HA_IP:$HA_PORT/"
+echo "  Relay ports=$RELAY_PORTS"

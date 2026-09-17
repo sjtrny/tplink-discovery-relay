@@ -1,0 +1,46 @@
+services:
+  tplink-discovery-relay:
+    image: ghcr.io/sjtrny/tplink-discovery-relay:latest
+    container_name: tplink-discovery-relay
+
+    # The relays and firewall manager operate in the host network namespace.
+    network_mode: host
+
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, NET_RAW]
+
+    restart: unless-stopped
+
+    environment:
+      LAN_IF: ${LAN_IF:?Set LAN_IF in .env}
+      LAN_NET: ${LAN_NET:?Set LAN_NET in .env}
+      DOCKER_SUBNET: ${DOCKER_SUBNET:?Set DOCKER_SUBNET in .env}
+      HA_IP: ${HA_IP:?Set HA_IP in .env}
+      HA_PORT: ${HA_PORT:-8123}
+
+      RELAY_PORTS: 9999,20002,20004
+      FIREWALL_CHECK_INTERVAL: "30"
+      RELAY_TOPOLOGY_CHECK_INTERVAL: "5"
+      RELAY_DEBUG: "false"
+
+      S6_VERBOSITY: "1"
+      S6_KILL_FINISH_MAXTIME: "10000"
+
+    # Coordinate iptables modifications with Docker and the host.
+    volumes:
+      - type: bind
+        source: /run/xtables.lock
+        target: /run/xtables.lock
+        bind:
+          create_host_path: false
+
+    read_only: true
+
+    tmpfs:
+      - /run:rw,exec,nosuid,nodev,mode=755,size=16m
+      - /tmp:rw,nosuid,nodev,noexec,mode=1777,size=4m
+
+    security_opt:
+      - no-new-privileges:true
+
+    stop_grace_period: 20s
